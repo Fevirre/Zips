@@ -26,6 +26,7 @@ def find_agent(name):
 SIGNATURE_AGENT = find_agent("mkt-signature-spoof.js")
 SCRIPTABLE_AGENT = find_agent("mkt-scriptable-course.js")
 saved_count = 0
+lap_snapshot_count = 0
 
 
 def safe_name(value):
@@ -33,7 +34,7 @@ def safe_name(value):
 
 
 def on_message(message, data):
-    global saved_count
+    global saved_count, lap_snapshot_count
     if message.get("type") == "error":
         print("[agent-error]", message.get("stack", message))
         return
@@ -69,6 +70,19 @@ def on_message(message, data):
             encoding="utf-8"
         )
         print(f"[DUMPED] {payload.get('className')} -> {complete_path}")
+    elif kind == "lap-class-catalog":
+        OUTPUT.mkdir(parents=True, exist_ok=True)
+        catalog_path = OUTPUT / "lap-class-catalog.json"
+        catalog_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        print(f"[LAP CATALOG] {len(payload.get('classes', []))} candidate classes -> {catalog_path}")
+    elif kind == "lap-runtime":
+        lap_snapshot_count += 1
+        OUTPUT.mkdir(parents=True, exist_ok=True)
+        class_name = safe_name(payload.get("className", "LapRuntime"))
+        handle = safe_name(payload.get("handle", str(lap_snapshot_count)))
+        path = OUTPUT / f"lap-{lap_snapshot_count:04d}-{class_name}-{handle}.json"
+        path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        print(f"[LAP SNAPSHOT] {payload.get('className')} -> {path}")
     else:
         print("[message]", payload)
 
@@ -100,7 +114,10 @@ def main():
     scriptable.exports_sync.scan()
     time.sleep(3)
     scriptable.exports_sync.disarm()
-    print(f"Finished: {saved_count} ScriptableCourse instance(s) written to {OUTPUT}")
+    print(
+        f"Finished: {saved_count} ScriptableCourse instance(s), "
+        f"{lap_snapshot_count} lap/race snapshot(s) written to {OUTPUT}"
+    )
     input("Press Enter to detach...")
     session.detach()
     _ = signature

@@ -1,5 +1,5 @@
 📦
-145632 /mkt-scriptable-course.js
+151076 /mkt-scriptable-course.js
 ✄
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -3359,6 +3359,9 @@ var require_mkt_scriptable_course = __commonJS({
     var MAX_DEPTH = 12;
     var MAX_ARRAY = 5e4;
     var MAX_NODES = 5e4;
+    var LAP_PATTERN = /(lap|round|race(rule|mode|setting|progress|director)?|goal|finish|checkpoint|section)/i;
+    var lapSnapshots = /* @__PURE__ */ new Map();
+    var lapCatalogSent = false;
     function classDescription(klass) {
       const hierarchy = [];
       for (const current of klass.hierarchy({ includeCurrent: true })) {
@@ -3455,6 +3458,154 @@ var require_mkt_scriptable_course = __commonJS({
       }
       return matches;
     }
+    function isLapRelated(value) {
+      return LAP_PATTERN.test(value);
+    }
+    function findLapCandidateClasses() {
+      const matches = [];
+      for (const assembly of Il2Cpp.domain.assemblies) {
+        for (const klass of assembly.image.classes) {
+          const classMatch = isLapRelated(klass.fullName);
+          const fieldMatch = klass.fields.some((field) => isLapRelated(`${field.name} ${field.type.name}`));
+          if (classMatch || fieldMatch)
+            matches.push(klass);
+        }
+      }
+      return matches;
+    }
+    function simpleValue(value, depth = 0) {
+      if (value === null || value === void 0)
+        return null;
+      if (typeof value === "boolean" || typeof value === "number" || typeof value === "string")
+        return value;
+      if (value instanceof Int64 || value instanceof UInt64 || value instanceof NativePointer)
+        return value.toString();
+      if (value instanceof Il2Cpp.String)
+        return value.isNull() ? null : value.content;
+      if (depth >= 3) {
+        try {
+          return { "$type": value.class?.fullName || value.type?.name || "unknown", "$handle": value.handle?.toString() };
+        } catch (_) {
+          return "<depth-limit>";
+        }
+      }
+      if (value instanceof Il2Cpp.Array) {
+        if (value.isNull())
+          return null;
+        const count = Math.min(value.length, 256);
+        const result = [];
+        for (let i = 0; i < count; i++)
+          result.push(simpleValue(value.get(i), depth + 1));
+        if (value.length > count)
+          result.push(`<${value.length - count} more elements>`);
+        return result;
+      }
+      if (value instanceof Il2Cpp.ValueType) {
+        const result = { "$type": value.type.name };
+        for (const field of value.type.class.fields) {
+          if (field.isStatic)
+            continue;
+          try {
+            result[field.name] = simpleValue(value.field(field.name).value, depth + 1);
+          } catch (error) {
+            result[field.name] = `<error:${String(error)}>`;
+          }
+        }
+        return result;
+      }
+      if (value instanceof Il2Cpp.Object) {
+        if (value.isNull())
+          return null;
+        const result = {
+          "$type": value.class.fullName,
+          "$handle": value.handle.toString()
+        };
+        for (const klass of value.class.hierarchy({ includeCurrent: true })) {
+          for (const field of klass.fields) {
+            if (field.isStatic || !isLapRelated(`${field.name} ${field.type.name}`))
+              continue;
+            try {
+              result[field.name] = simpleValue(value.field(field.name).value, depth + 1);
+            } catch (error) {
+              result[field.name] = `<error:${String(error)}>`;
+            }
+          }
+        }
+        return result;
+      }
+      try {
+        return value.toString();
+      } catch (_) {
+        return "<unprintable>";
+      }
+    }
+    function lapObjectSnapshot(object, klass) {
+      const result = {
+        "$type": klass.fullName,
+        "$handle": object.handle.toString()
+      };
+      const includeAll = isLapRelated(klass.fullName);
+      for (const current of klass.hierarchy({ includeCurrent: true })) {
+        for (const field of current.fields) {
+          if (field.isStatic)
+            continue;
+          if (!includeAll && !isLapRelated(`${field.name} ${field.type.name}`))
+            continue;
+          try {
+            result[field.name] = simpleValue(object.field(field.name).value);
+          } catch (error) {
+            result[field.name] = `<error:${String(error)}>`;
+          }
+        }
+      }
+      return result;
+    }
+    function scanLapRuntime() {
+      const candidates = findLapCandidateClasses();
+      if (!lapCatalogSent) {
+        lapCatalogSent = true;
+        send({
+          type: "lap-class-catalog",
+          classes: candidates.map((klass) => ({
+            className: klass.fullName,
+            assembly: klass.assemblyName,
+            fields: klass.fields.map((field) => ({
+              name: field.name,
+              type: field.type.name,
+              offset: field.offset,
+              isStatic: field.isStatic
+            }))
+          }))
+        });
+      }
+      for (const klass of candidates) {
+        let objects;
+        try {
+          objects = Il2Cpp.gc.choose(klass).slice(0, 32);
+        } catch (_) {
+          continue;
+        }
+        for (const object of objects) {
+          try {
+            const snapshot = lapObjectSnapshot(object, klass);
+            const encoded = JSON.stringify(snapshot);
+            const key = `${klass.fullName}@${object.handle}`;
+            if (lapSnapshots.get(key) === encoded)
+              continue;
+            lapSnapshots.set(key, encoded);
+            send({
+              type: "lap-runtime",
+              className: klass.fullName,
+              assembly: klass.assemblyName,
+              handle: object.handle.toString(),
+              snapshot
+            });
+          } catch (error) {
+            send({ type: "scriptable-error", className: klass.fullName, error: `lap snapshot: ${String(error)}` });
+          }
+        }
+      }
+    }
     function getJsonUtility() {
       try {
         const assembly = Il2Cpp.domain.tryAssembly("UnityEngine.CoreModule");
@@ -3520,6 +3671,7 @@ var require_mkt_scriptable_course = __commonJS({
               });
             }
           }
+          scanLapRuntime();
         });
       } catch (error) {
         send({ type: "scriptable-error", error: String(error) });
@@ -3534,6 +3686,8 @@ var require_mkt_scriptable_course = __commonJS({
       arm() {
         armed = true;
         dumped.clear();
+        lapSnapshots.clear();
+        lapCatalogSent = false;
         send({ type: "scriptable-status", message: "ScriptableCourse capture armed" });
         void scan();
         return true;

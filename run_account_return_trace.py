@@ -18,7 +18,7 @@ def on_message(message, data):
 
 
 def main():
-    print("[RUNNER] account-return-v1")
+    print("[RUNNER] account-return-v2-java")
     for path in (SIGNATURE_AGENT, RETURN_AGENT):
         if not path.is_file():
             raise SystemExit(f"Missing required agent beside runner: {path.name}")
@@ -61,4 +61,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

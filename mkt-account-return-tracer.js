@@ -1,5 +1,5 @@
 📦
-573074 /account-return/mkt-account-return-tracer.js
+575239 /account-return/mkt-account-return-tracer.js
 ✄
 var __defProp = Object.defineProperty;
 var __export = (target, all) => {
@@ -16839,12 +16839,12 @@ Script.bindWeak(runtime, () => {
 var frida_java_bridge_default = runtime;
 
 // account-return/mkt-account-return-tracer.ts
-var VERSION = "account-return-v2-java";
-var PACKAGE = "com.nintendo.zaka";
+var VERSION = "account-return-v3-focused";
 var ACCOUNT_WINDOW_MS = 45e3;
 var MAX_IL2CPP_HOOKS = 220;
 var accountWindowUntil = 0;
 var emittedMethods = /* @__PURE__ */ new Set();
+var emittedPathOperations = /* @__PURE__ */ new Set();
 function emit(type, details = {}) {
   send({ type, agentVersion: VERSION, ...details });
 }
@@ -16861,6 +16861,15 @@ function safeString(value) {
   } catch (_) {
     return null;
   }
+}
+function interestingPreferenceKey(key) {
+  return key !== null && /(token|account|auth|session|player|user|npf|sakasho)/i.test(key) && !/(firebase|fire-|analytics|last_pause_time|app_backgrounded)/i.test(key);
+}
+function interestingAccountPath(path) {
+  if (path === null)
+    return false;
+  const lower = path.toLowerCase();
+  return lower.includes("deviceaccount") || lower.includes("playerprefs") || lower.endsWith("/local1") || lower.endsWith("/local2") || lower.includes("nintendo") || lower.includes("authentication") || lower.includes("/auth");
 }
 function sanitizeIntent(intent) {
   const result = {};
@@ -16919,22 +16928,56 @@ function installJavaHooks() {
           emit("android-resume", { activity: name });
           return resume.call(this, activity);
         };
+        const Activity = frida_java_bridge_default.use("android.app.Activity");
+        const setResult = Activity.setResult.overload("int", "android.content.Intent");
+        setResult.implementation = function(resultCode, intent) {
+          beginAccountWindow("setResult");
+          emit("android-activity-result", {
+            direction: "setResult",
+            activity: safeString(this.getClass().getName()),
+            resultCode,
+            intent: intent === null ? null : sanitizeIntent(intent)
+          });
+          return setResult.call(this, resultCode, intent);
+        };
+        const onActivityResult = Activity.onActivityResult.overload("int", "int", "android.content.Intent");
+        onActivityResult.implementation = function(requestCode, resultCode, intent) {
+          beginAccountWindow("onActivityResult");
+          emit("android-activity-result", {
+            direction: "onActivityResult",
+            activity: safeString(this.getClass().getName()),
+            requestCode,
+            resultCode,
+            intent: intent === null ? null : sanitizeIntent(intent)
+          });
+          return onActivityResult.call(this, requestCode, resultCode, intent);
+        };
       } catch (error) {
         emit("java-hook-error", { area: "activity", error: safeString(error) });
       }
       try {
         const Editor = frida_java_bridge_default.use("android.app.SharedPreferencesImpl$EditorImpl");
+        const preferenceFile = (editor) => {
+          try {
+            const owner = editor["this$0"].value;
+            return safeString(owner.mFile.value.getAbsolutePath());
+          } catch (_) {
+            return null;
+          }
+        };
         for (const methodName of ["putString", "putStringSet", "putInt", "putLong", "putFloat", "putBoolean", "remove"]) {
           const dispatcher = Editor[methodName];
           if (dispatcher === void 0)
             continue;
           for (const overload of dispatcher.overloads) {
             overload.implementation = function(...args) {
-              if (accountWindowActive()) {
+              const key = safeString(args[0]);
+              if (accountWindowActive() && interestingPreferenceKey(key)) {
                 const rawValue = args.length > 1 ? safeString(args[1]) : null;
                 emit("preference-write", {
                   operation: methodName,
-                  key: safeString(args[0]),
+                  preferenceFile: preferenceFile(this),
+                  key,
                   value: rawValue === null ? null : `<redacted:${rawValue.length}>`
                 });
               }
@@ -16948,8 +16991,6 @@ function installJavaHooks() {
             continue;
           for (const overload of dispatcher.overloads) {
             overload.implementation = function(...args) {
-              if (accountWindowActive())
-                emit("preference-write", { operation: methodName });
               return overload.call(this, ...args);
             };
           }
@@ -16963,7 +17004,7 @@ function installJavaHooks() {
           overload.implementation = function(...args) {
             if (accountWindowActive() && args.length > 0) {
               const target = safeString(args[0]);
-              if (target !== null && (target.includes(PACKAGE) || target.includes("/data/user/0/"))) {
+              if (interestingAccountPath(target)) {
                 emit("java-file-open", { path: target });
               }
             }
@@ -16997,8 +17038,13 @@ function installNativePathHooks() {
             return;
           try {
             const path = args[spec.pathIndex].readCString();
-            if (path !== null && path.includes(PACKAGE))
-              emit("native-file-access", { operation: spec.name, path });
+            if (interestingAccountPath(path)) {
+              const key = `${spec.name}:${path}`;
+              if (!emittedPathOperations.has(key)) {
+                emittedPathOperations.add(key);
+                emit("native-file-access", { operation: spec.name, path });
+              }
+            }
           } catch (_) {
           }
         }

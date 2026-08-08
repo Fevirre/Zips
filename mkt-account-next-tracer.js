@@ -1,5 +1,5 @@
 📦
-131474 /account-prototype/mkt-account-next-tracer.js
+132115 /account-prototype/mkt-account-next-tracer.js
 ✄
 // node_modules/frida-il2cpp-bridge/dist/index.js
 var __decorate = function(decorators, target, key, desc) {
@@ -3417,6 +3417,23 @@ function summarizeObject(object, depth = 0, seen = /* @__PURE__ */ new Set()) {
   if (depth >= 6)
     return summary;
   seen.add(address);
+  if (classChain(object.class).some((klass) => klass.type.name === "System.Delegate")) {
+    try {
+      const methodHandle = boundFieldValue(object, "method");
+      if (!methodHandle.isNull()) {
+        const method = new Il2Cpp.Method(methodHandle);
+        summary.delegateMethod = {
+          class: method.class.type.name,
+          name: method.name,
+          parameters: method.parameters.map((parameter) => parameter.type.name),
+          returnType: method.returnType.name,
+          address: method.virtualAddress.toString()
+        };
+      }
+    } catch (error) {
+      summary.delegateMethodError = safeText(error);
+    }
+  }
   if (object.class.type.name.startsWith("System.Collections.Generic.List<")) {
     try {
       const size = Number(boundFieldValue(object, "_size"));

@@ -1,5 +1,5 @@
 📦
-129889 /account-prototype/mkt-account-next-tracer.js
+129268 /account-prototype/mkt-account-next-tracer.js
 ✄
 // node_modules/frida-il2cpp-bridge/dist/index.js
 var __decorate = function(decorators, target, key, desc) {
@@ -3366,14 +3366,6 @@ function classChain(start) {
   }
   return result;
 }
-function findMethod(start, name, parameterCount = 0) {
-  for (const klass of classChain(start)) {
-    const method = klass.methods.find((candidate) => candidate.name === name && candidate.parameterCount === parameterCount);
-    if (method !== void 0)
-      return method;
-  }
-  return null;
-}
 function findField(start, name) {
   for (const klass of classChain(start)) {
     const field = klass.fields.find((candidate) => candidate.name === name);
@@ -3456,22 +3448,13 @@ function installButtonTrace() {
             address: method.virtualAddress.toString()
           }))
         }));
-        const getGameObject = findMethod(button.class, "get_gameObject");
-        if (getGameObject !== null) {
-          const gameObject = getGameObject.invoke.call(button);
-          const getName = findMethod(gameObject.class, "get_name");
-          if (getName !== null) {
-            const name = getName.invoke.call(gameObject);
-            objectName = name.content ?? "<unnamed>";
-          }
-        }
+        const gameObject = button.method("get_gameObject", 0).invoke();
+        const name = gameObject.method("get_name", 0).invoke();
+        objectName = name.content ?? "<unnamed>";
         const onClickField = findField(button.class, "m_OnClick");
         if (onClickField !== null) {
           const value = button.field(onClickField.name).value;
-          if (value instanceof Il2Cpp.Object)
-            onClick = summarizeObject(value);
-          else
-            onClick = safeText(value);
+          onClick = summarizeObject(value);
         }
       } catch (error) {
         objectName = `<resolution failed: ${String(error)}>`;

@@ -9,7 +9,7 @@ import frida
 
 ROOT = pathlib.Path(__file__).resolve().parent
 TRACE_AGENT = ROOT / "mkt-account-next-tracer.js"
-RUNNER_VERSION = "two-stage-v4"
+RUNNER_VERSION = "two-stage-v5-dialog-action"
 
 
 def find_signature_agent():

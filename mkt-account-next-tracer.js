@@ -1,5 +1,5 @@
 📦
-133180 /account-prototype/mkt-account-next-tracer.js
+133535 /account-prototype/mkt-account-next-tracer.js
 ✄
 // node_modules/frida-il2cpp-bridge/dist/index.js
 var __decorate = function(decorators, target, key, desc) {
@@ -3350,7 +3350,7 @@ var armed = true;
 var captured = false;
 var captureCount = 0;
 var AUTO_REARM_MS = 750;
-var AGENT_VERSION = "two-stage-v4";
+var AGENT_VERSION = "two-stage-v5-dialog-action";
 function safeText(value) {
   try {
     if (value === null || value === void 0)
@@ -3417,9 +3417,17 @@ function summarizeObject(object, depth = 0, seen = /* @__PURE__ */ new Set()) {
   };
   if (seen.has(address))
     return { ...summary, circular: true };
+  seen.add(address);
+  if (object.class.type.name === "Game.UICommonDialog.<>c__DisplayClass14_0") {
+    try {
+      const setting = boundFieldValue(object, "buttonSetting");
+      summary.buttonSettingExpanded = summarizeObject(setting, 0, /* @__PURE__ */ new Set([address]));
+    } catch (error) {
+      summary.buttonSettingError = safeText(error);
+    }
+  }
   if (depth >= 6)
     return summary;
-  seen.add(address);
   if (classChain(object.class).some((klass) => klass.type.name === "System.Delegate")) {
     try {
       const methodHandle = boundFieldValue(object, "method");

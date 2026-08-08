@@ -9,6 +9,7 @@ import frida
 
 ROOT = pathlib.Path(__file__).resolve().parent
 TRACE_AGENT = ROOT / "mkt-account-next-tracer.js"
+RUNNER_VERSION = "two-stage-v4"
 
 
 def find_signature_agent():
@@ -44,6 +45,7 @@ def on_message(message, data):
 
 
 def main():
+    print(f"[RUNNER] {RUNNER_VERSION}")
     signature_agent = find_signature_agent()
     if not TRACE_AGENT.is_file():
         raise SystemExit(

@@ -1,5 +1,5 @@
 📦
-132115 /account-prototype/mkt-account-next-tracer.js
+132691 /account-prototype/mkt-account-next-tracer.js
 ✄
 // node_modules/frida-il2cpp-bridge/dist/index.js
 var __decorate = function(decorators, target, key, desc) {
@@ -3429,6 +3429,16 @@ function summarizeObject(object, depth = 0, seen = /* @__PURE__ */ new Set()) {
           returnType: method.returnType.name,
           address: method.virtualAddress.toString()
         };
+      }
+      const target = boundFieldValue(object, "m_target");
+      if (target !== null && !target.handle.isNull() && target.class.type.name === "Game.UIFirstSetting") {
+        summary.delegateTargetMethods = classChain(target.class).flatMap((klass) => klass.methods.map((candidate) => ({
+          class: klass.type.name,
+          name: candidate.name,
+          parameters: candidate.parameters.map((parameter) => parameter.type.name),
+          returnType: candidate.returnType.name,
+          address: candidate.virtualAddress.toString()
+        }))).slice(0, 256);
       }
     } catch (error) {
       summary.delegateMethodError = safeText(error);

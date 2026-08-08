@@ -1,5 +1,5 @@
 📦
-129268 /account-prototype/mkt-account-next-tracer.js
+130035 /account-prototype/mkt-account-next-tracer.js
 ✄
 // node_modules/frida-il2cpp-bridge/dist/index.js
 var __decorate = function(decorators, target, key, desc) {
@@ -3366,6 +3366,14 @@ function classChain(start) {
   }
   return result;
 }
+function findMethod(start, name, parameterCount = 0) {
+  for (const klass of classChain(start)) {
+    const method = klass.methods.find((candidate) => candidate.name === name && candidate.parameterCount === parameterCount);
+    if (method !== void 0)
+      return method;
+  }
+  return null;
+}
 function findField(start, name) {
   for (const klass of classChain(start)) {
     const field = klass.fields.find((candidate) => candidate.name === name);
@@ -3389,7 +3397,7 @@ function summarizeObject(object, depth = 0) {
       if (field.isStatic || Object.keys(fields).length >= 48)
         continue;
       try {
-        const value = object.field(field.name).value;
+        const value = field.bind(object).value;
         if (value instanceof Il2Cpp.String) {
           fields[`${klass.name}.${field.name}`] = value.content;
         } else if (value instanceof Il2Cpp.Object) {
@@ -3432,40 +3440,56 @@ function installButtonTrace() {
       captured = true;
       armed = false;
       let objectName = "<unresolved>";
+      let objectNameError = null;
       let className = "UnityEngine.UI.Button";
       let hierarchy = [];
       let onClick = null;
+      let onClickError = null;
+      let button;
       try {
-        const button = new Il2Cpp.Object(args[0]);
+        button = new Il2Cpp.Object(args[0]);
         className = button.class.type.name;
         hierarchy = classChain(button.class).map((klass) => ({
           class: klass.type.name,
-          fields: klass.fields.map((field) => `${field.type.name} ${field.name}`),
-          methods: klass.methods.map((method) => ({
-            name: method.name,
-            parameters: method.parameters.map((parameter) => parameter.type.name),
-            returnType: method.returnType.name,
-            address: method.virtualAddress.toString()
-          }))
+          fields: klass.fields.map((field) => `${field.type.name} ${field.name}`)
         }));
-        const gameObject = button.method("get_gameObject", 0).invoke();
-        const name = gameObject.method("get_name", 0).invoke();
-        objectName = name.content ?? "<unnamed>";
-        const onClickField = findField(button.class, "m_OnClick");
-        if (onClickField !== null) {
-          const value = button.field(onClickField.name).value;
-          onClick = summarizeObject(value);
-        }
       } catch (error) {
-        objectName = `<resolution failed: ${String(error)}>`;
+        objectNameError = `button construction failed: ${safeText(error)}`;
+        button = null;
+      }
+      if (button !== null) {
+        try {
+          const getGameObject = findMethod(button.class, "get_gameObject", 0);
+          if (getGameObject === null)
+            throw new Error("get_gameObject() was not found");
+          const gameObject = getGameObject.bind(button).invoke();
+          const getName = findMethod(gameObject.class, "get_name", 0);
+          if (getName === null)
+            throw new Error("get_name() was not found");
+          const name = getName.bind(gameObject).invoke();
+          objectName = name.content ?? "<unnamed>";
+        } catch (error) {
+          objectNameError = safeText(error);
+        }
+        try {
+          const onClickField = findField(button.class, "m_OnClick");
+          if (onClickField === null)
+            throw new Error("m_OnClick field was not found");
+          const value = onClickField.bind(button).value;
+          onClick = summarizeObject(value);
+        } catch (error) {
+          onClickError = safeText(error);
+        }
       }
       const frames = Thread.backtrace(this.context, Backtracer.ACCURATE).slice(0, 32).map(describePointer);
       send({
         type: "account-next-click",
         objectName,
+        objectNameError,
         className,
         hierarchy,
         onClick,
+        onClickError,
         buttonAddress: args[0].toString(),
         pressAddress: press.virtualAddress.toString(),
         frames

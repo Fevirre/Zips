@@ -1,5 +1,5 @@
 📦
-130035 /account-prototype/mkt-account-next-tracer.js
+131474 /account-prototype/mkt-account-next-tracer.js
 ✄
 // node_modules/frida-il2cpp-bridge/dist/index.js
 var __decorate = function(decorators, target, key, desc) {
@@ -3382,15 +3382,52 @@ function findField(start, name) {
   }
   return null;
 }
-function summarizeObject(object, depth = 0) {
+function boundFieldValue(object, name) {
+  const field = findField(object.class, name);
+  if (field === null)
+    throw new Error(`${object.class.type.name}.${name} was not found`);
+  return field.bind(object).value;
+}
+function summarizeArray(array, depth, seen) {
+  const values = [];
+  const count = Math.min(array.length, 16);
+  for (let index = 0; index < count; index++) {
+    const value = array.get(index);
+    if (value instanceof Il2Cpp.String)
+      values.push(value.content);
+    else if (value instanceof Il2Cpp.Object)
+      values.push(summarizeObject(value, depth + 1, seen));
+    else
+      values.push(safeText(value));
+  }
+  if (array.length > count)
+    values.push(`<${array.length - count} more>`);
+  return values;
+}
+function summarizeObject(object, depth = 0, seen = /* @__PURE__ */ new Set()) {
   if (object === null || object.handle.isNull())
     return null;
+  const address = object.handle.toString();
   const summary = {
-    address: object.handle.toString(),
+    address,
     class: object.class.type.name
   };
-  if (depth >= 2)
+  if (seen.has(address))
+    return { ...summary, circular: true };
+  if (depth >= 6)
     return summary;
+  seen.add(address);
+  if (object.class.type.name.startsWith("System.Collections.Generic.List<")) {
+    try {
+      const size = Number(boundFieldValue(object, "_size"));
+      const items = boundFieldValue(object, "_items");
+      summary.size = size;
+      summary.items = summarizeArray(items, depth, seen).slice(0, Math.min(size, 16));
+    } catch (error) {
+      summary.listError = safeText(error);
+    }
+    return summary;
+  }
   const fields = {};
   for (const klass of classChain(object.class)) {
     for (const field of klass.fields) {
@@ -3400,8 +3437,10 @@ function summarizeObject(object, depth = 0) {
         const value = field.bind(object).value;
         if (value instanceof Il2Cpp.String) {
           fields[`${klass.name}.${field.name}`] = value.content;
+        } else if (value instanceof Il2Cpp.Array) {
+          fields[`${klass.name}.${field.name}`] = summarizeArray(value, depth, seen);
         } else if (value instanceof Il2Cpp.Object) {
-          fields[`${klass.name}.${field.name}`] = summarizeObject(value, depth + 1);
+          fields[`${klass.name}.${field.name}`] = summarizeObject(value, depth + 1, seen);
         } else {
           fields[`${klass.name}.${field.name}`] = safeText(value);
         }

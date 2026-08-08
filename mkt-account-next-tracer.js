@@ -1,5 +1,5 @@
 📦
-132691 /account-prototype/mkt-account-next-tracer.js
+133074 /account-prototype/mkt-account-next-tracer.js
 ✄
 // node_modules/frida-il2cpp-bridge/dist/index.js
 var __decorate = function(decorators, target, key, desc) {
@@ -3348,6 +3348,8 @@ globalThis.Il2Cpp = Il2Cpp2;
 // account-prototype/mkt-account-next-tracer.ts
 var armed = true;
 var captured = false;
+var captureCount = 0;
+var AUTO_REARM_MS = 750;
 function safeText(value) {
   try {
     if (value === null || value === void 0)
@@ -3550,6 +3552,7 @@ function installButtonTrace() {
       const frames = Thread.backtrace(this.context, Backtracer.ACCURATE).slice(0, 32).map(describePointer);
       send({
         type: "account-next-click",
+        captureNumber: ++captureCount,
         objectName,
         objectNameError,
         className,
@@ -3560,11 +3563,19 @@ function installButtonTrace() {
         pressAddress: press.virtualAddress.toString(),
         frames
       });
+      setTimeout(() => {
+        captured = false;
+        armed = true;
+        send({
+          type: "account-trace-rearmed",
+          message: "Ready for the next MKT button (for example Link Complete > OK)."
+        });
+      }, AUTO_REARM_MS);
     }
   });
   send({
     type: "account-trace-ready",
-    message: "Next-button trace armed. Tap Nintendo Account > Next once.",
+    message: "Multi-button trace armed. Tap Next, complete linking, then tap Link Complete > OK.",
     pressAddress: press.virtualAddress.toString()
   });
 }
@@ -3572,6 +3583,7 @@ rpc.exports = {
   arm() {
     captured = false;
     armed = true;
+    captureCount = 0;
     return "armed";
   },
   disarm() {

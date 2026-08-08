@@ -1,5 +1,5 @@
 📦
-479066 /index.js
+485031 /index.js
 ✄
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -13788,6 +13788,145 @@ var require_index = __commonJS({
         console.log("[mkt-sigspoof] hooks installed; resuming MKT");
       });
     }
+    function patchParisCache() {
+      frida_java_bridge_1.default.perform(() => {
+        const J = frida_java_bridge_1.default;
+        const File = J.use("java.io.File");
+        const FileInputStream = J.use("java.io.FileInputStream");
+        const FileOutputStream = J.use("java.io.FileOutputStream");
+        const targetCab = "CAB-bf94135b2c902366be66f476fb7f210b";
+        const replacementPath = "/storage/emulated/0/Android/data/com.nintendo.zaka/files/frida-replacements/e5f243f1_479c2d6b";
+        const nabeRoot = "/data/user/0/com.nintendo.zaka/files/Nabe";
+        let targetPath = nabeRoot + "/e5f/e5f243f1_479c2d6b";
+        const originalSize = "37005";
+        send({ type: "cache-scan", message: `Patching catalog-mapped Paris cache entry: ${targetPath}` });
+        const replacement = File.$new(replacementPath);
+        if (!replacement.isFile()) {
+          send({ type: "cache-error", message: `Replacement not found: ${replacementPath}` });
+          return;
+        }
+        function copyFile(source, destination) {
+          const input = FileInputStream.$new(source);
+          const output = FileOutputStream.$new(destination, false);
+          const buffer = J.array("byte", new Array(65536).fill(0));
+          try {
+            let count;
+            while ((count = input.read(buffer)) > 0)
+              output.write(buffer, 0, count);
+            output.flush();
+          } finally {
+            input.close();
+            output.close();
+          }
+        }
+        let target = File.$new(targetPath);
+        if (!target.isFile()) {
+          send({ type: "cache-scan", message: "Exact CDN-style path absent; resolving the transformed cache filename from metadata..." });
+          const pendingPaths = [File.$new(nabeRoot)];
+          const keyMatches = [];
+          const sizeMatches = [];
+          let examined = 0;
+          while (pendingPaths.length > 0) {
+            const entry = pendingPaths.pop();
+            if (entry.isDirectory()) {
+              const children = entry.listFiles();
+              if (children !== null)
+                for (let i = 0; i < children.length; i++)
+                  pendingPaths.push(children[i]);
+              continue;
+            }
+            if (!entry.isFile() || entry.getName().toString().endsWith(".frida-backup"))
+              continue;
+            examined++;
+            const name = entry.getName().toString().toLowerCase();
+            if (name.includes("e5f243f1") || name.includes("479c2d6b"))
+              keyMatches.push(entry);
+            if (entry.length().toString() === "37008")
+              sizeMatches.push(entry);
+          }
+          const matches = keyMatches.length > 0 ? keyMatches : sizeMatches;
+          if (matches.length !== 1) {
+            const preview = matches.slice(0, 8).map((item) => item.getAbsolutePath().toString()).join(", ");
+            send({
+              type: "cache-error",
+              message: `Could not resolve one Paris cache entry: ${keyMatches.length} key matches, ${sizeMatches.length} size matches across ${examined} files${preview ? `; candidates: ${preview}` : ""}`
+            });
+            return;
+          }
+          target = matches[0];
+          targetPath = target.getAbsolutePath().toString();
+          send({ type: "cache-scan", message: `Resolved Paris cache entry: ${targetPath}` });
+        }
+        if (replacement.length().toString() !== "37008") {
+          send({ type: "cache-error", message: `Encrypted replacement must be exactly 37008 bytes; got ${replacement.length()}` });
+          return;
+        }
+        const directBackup = File.$new(targetPath + ".frida-backup");
+        if (!directBackup.exists())
+          copyFile(target, directBackup);
+        copyFile(replacement, target);
+        send({
+          type: "cache-patched",
+          path: targetPath,
+          backup: directBackup.getAbsolutePath().toString(),
+          checked: 0
+        });
+        return;
+        const pending = [File.$new(nabeRoot)];
+        let checked = 0;
+        while (pending.length > 0) {
+          const entry = pending.pop();
+          if (entry.isDirectory()) {
+            const children = entry.listFiles();
+            if (children !== null)
+              for (let i = 0; i < children.length; i++)
+                pending.push(children[i]);
+            continue;
+          }
+          if (!entry.isFile() || entry.getName().toString().endsWith(".frida-backup"))
+            continue;
+          checked++;
+          if (checked % 2000 === 0)
+            send({ type: "cache-scan", message: `Checked metadata for ${checked} Nabe files...` });
+          if (entry.length().toString() !== originalSize)
+            continue;
+          try {
+            const input = FileInputStream.$new(entry);
+            const headerBytes = J.array("byte", new Array(4096).fill(0));
+            const count = input.read(headerBytes);
+            input.close();
+            if (count <= 0)
+              continue;
+            let header = "";
+            for (let i = 0; i < count; i++) {
+              const n = headerBytes[i];
+              header += String.fromCharCode(n < 0 ? n + 256 : n);
+            }
+            if (!header.includes(targetCab))
+              continue;
+            const backup = File.$new(entry.getAbsolutePath() + ".frida-backup");
+            if (!backup.exists())
+              copyFile(entry, backup);
+            copyFile(replacement, entry);
+            send({
+              type: "cache-patched",
+              path: entry.getAbsolutePath().toString(),
+              backup: backup.getAbsolutePath().toString(),
+              checked
+            });
+            return;
+          } catch (_) {
+          }
+        }
+        send({ type: "cache-miss", message: `Paris CAB not found after checking ${checked} Nabe files` });
+      });
+    }
+    rpc.exports = {
+      patchcache() {
+        setImmediate(patchParisCache);
+        return "scheduled";
+      }
+    };
     setImmediate(installHooks);
   }
 });

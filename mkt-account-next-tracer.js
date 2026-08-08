@@ -1,5 +1,5 @@
 📦
-133074 /account-prototype/mkt-account-next-tracer.js
+133180 /account-prototype/mkt-account-next-tracer.js
 ✄
 // node_modules/frida-il2cpp-bridge/dist/index.js
 var __decorate = function(decorators, target, key, desc) {
@@ -3350,6 +3350,7 @@ var armed = true;
 var captured = false;
 var captureCount = 0;
 var AUTO_REARM_MS = 750;
+var AGENT_VERSION = "two-stage-v4";
 function safeText(value) {
   try {
     if (value === null || value === void 0)
@@ -3552,6 +3553,7 @@ function installButtonTrace() {
       const frames = Thread.backtrace(this.context, Backtracer.ACCURATE).slice(0, 32).map(describePointer);
       send({
         type: "account-next-click",
+        agentVersion: AGENT_VERSION,
         captureNumber: ++captureCount,
         objectName,
         objectNameError,
@@ -3575,6 +3577,7 @@ function installButtonTrace() {
   });
   send({
     type: "account-trace-ready",
+    agentVersion: AGENT_VERSION,
     message: "Multi-button trace armed. Tap Next, complete linking, then tap Link Complete > OK.",
     pressAddress: press.virtualAddress.toString()
   });

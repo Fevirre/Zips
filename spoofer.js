@@ -1,16 +1,21 @@
 'use strict';
 
 /*
- * spoofer.js - native-only Android/QJS regional probe v3
+ * spoofer.js - native-only Android/QJS regional spoofer + runtime tracer v4
  * No Java bridge required.
  *
- * Keeps the working America/New_York / en-US environment spoof while
- * rate-limiting duplicate reads and logging the time/locale-related
- * system-property keys MKT actually requests.
+ * Goals:
+ *   - set US/New York environment once
+ *   - keep Android property spoof/probe
+ *   - avoid hot-path getenv interception
+ *   - log selected native runtime functions with caller module + offset
+ *   - never modify clock/network/file return values
  */
 
-const VERSION = 'spoofer-native-v3';
-const LOG_PATH = '/storage/emulated/0/Android/data/com.nintendo.zaka/files/Frida/Logs/spoofer.log';
+const VERSION = 'spoofer-native-v4';
+const ROOT = '/storage/emulated/0/Android/data/com.nintendo.zaka/files/Frida/Logs';
+const LOG_PATH = ROOT + '/spoofer.log';
+const RUNTIME_LOG = ROOT + '/runtime_functions.log';
 
 const SPOOF_PROPERTIES = {
   'persist.sys.timezone': 'America/New_York',
@@ -29,96 +34,70 @@ const SPOOF_ENV = {
   'LANGUAGE': 'en_US:en'
 };
 
-const pinnedStrings = {};
-for (const key of Object.keys(SPOOF_ENV)) {
-  pinnedStrings[key] = Memory.allocUtf8String(SPOOF_ENV[key]);
-}
+const runtimeCounts = new Map();
+const propertyCounts = new Map();
+const MAX_RUNTIME_LINES = 500;
+let runtimeLines = 0;
 
-const hitCounts = new Map();
-const firstSeen = new Set();
-const MAX_UNIQUE_LOGS = 160;
-const MAX_PER_KEY_VERBOSE = 3;
-let uniqueLogs = 0;
-
-function log(message) {
+function append(path, message) {
   try {
-    const f = new File(LOG_PATH, 'a');
+    const f = new File(path, 'a');
     f.write(new Date().toISOString() + ' [' + VERSION + '] ' + message + '\n');
     f.flush();
     f.close();
   } catch (_) {}
+}
+
+function log(message) {
+  append(LOG_PATH, message);
   try { console.log('[mkt-spoofer] ' + message); } catch (_) {}
 }
 
-function shouldLogKey(channel, key) {
-  const id = channel + ':' + key;
-  const count = (hitCounts.get(id) || 0) + 1;
-  hitCounts.set(id, count);
-
-  if (count <= MAX_PER_KEY_VERBOSE) return true;
-  if (count === 10 || count === 50 || count === 100 || count === 500 || count === 1000) return true;
-  return false;
-}
-
-function logKey(channel, key, value, spoofed) {
-  const id = channel + ':' + key;
-  if (!firstSeen.has(id)) {
-    firstSeen.add(id);
-    if (uniqueLogs < MAX_UNIQUE_LOGS) {
-      uniqueLogs++;
-      log('FIRST ' + channel + ' key=' + key + ' value=' + value + (spoofed ? ' spoofed=1' : ' spoofed=0'));
-    }
-    return;
-  }
-
-  if (shouldLogKey(channel, key)) {
-    const count = hitCounts.get(id) || 0;
-    log('HIT ' + channel + ' key=' + key + ' count=' + count + ' value=' + value + (spoofed ? ' spoofed=1' : ' spoofed=0'));
-  }
-}
-
-function interestingKey(key) {
-  if (!key) return false;
-  const k = key.toLowerCase();
-  return k.includes('time') ||
-         k.includes('clock') ||
-         k.includes('date') ||
-         k.includes('zone') ||
-         k.includes('locale') ||
-         k.includes('region') ||
-         k.includes('country') ||
-         k.includes('language') ||
-         k.includes('network') ||
-         k.includes('ntp');
+function runtimeLog(message) {
+  if (runtimeLines >= MAX_RUNTIME_LINES) return;
+  runtimeLines++;
+  append(RUNTIME_LOG, message);
 }
 
 function globalExport(name) {
   try { return Module.findGlobalExportByName(name); } catch (_) { return null; }
 }
 
+function callerInfo(address) {
+  try {
+    const mod = Process.findModuleByAddress(address);
+    if (mod !== null) {
+      return mod.name + '+0x' + address.sub(mod.base).toString(16);
+    }
+  } catch (_) {}
+  try { return DebugSymbol.fromAddress(address).toString(); } catch (_) {}
+  return address ? address.toString() : '<unknown>';
+}
+
+function shouldEmitRuntime(name) {
+  const n = (runtimeCounts.get(name) || 0) + 1;
+  runtimeCounts.set(name, n);
+  return n <= 3 || n === 10 || n === 50 || n === 100 || n === 500 || n === 1000;
+}
+
 function applyEnvironment() {
   const setenvPtr = globalExport('setenv');
   if (setenvPtr !== null) {
-    try {
-      const setenv = new NativeFunction(setenvPtr, 'int', ['pointer', 'pointer', 'int']);
-      for (const key of Object.keys(SPOOF_ENV)) {
-        const k = Memory.allocUtf8String(key);
-        const v = Memory.allocUtf8String(SPOOF_ENV[key]);
-        const rc = setenv(k, v, 1);
-        log('setenv ' + key + '=' + SPOOF_ENV[key] + ' rc=' + rc);
-      }
-    } catch (e) {
-      log('setenv setup failed: ' + e);
+    const setenv = new NativeFunction(setenvPtr, 'int', ['pointer', 'pointer', 'int']);
+    for (const key of Object.keys(SPOOF_ENV)) {
+      const rc = setenv(
+        Memory.allocUtf8String(key),
+        Memory.allocUtf8String(SPOOF_ENV[key]),
+        1
+      );
+      log('setenv ' + key + '=' + SPOOF_ENV[key] + ' rc=' + rc);
     }
-  } else {
-    log('setenv export not found');
   }
 
   const tzsetPtr = globalExport('tzset');
   if (tzsetPtr !== null) {
     try {
-      const tzset = new NativeFunction(tzsetPtr, 'void', []);
-      tzset();
+      new NativeFunction(tzsetPtr, 'void', [])();
       log('tzset applied');
     } catch (e) {
       log('tzset failed: ' + e);
@@ -126,10 +105,29 @@ function applyEnvironment() {
   }
 }
 
-function hookSystemPropertyGet() {
-  const p = globalExport('__system_property_get');
+function interestingProperty(key) {
+  if (!key) return false;
+  const k = key.toLowerCase();
+  return k.includes('time') || k.includes('clock') || k.includes('date') ||
+         k.includes('zone') || k.includes('locale') || k.includes('region') ||
+         k.includes('country') || k.includes('language') || k.includes('ntp') ||
+         k.includes('network');
+}
+
+function propertyLog(channel, key, value, spoofed) {
+  const id = channel + ':' + key;
+  const n = (propertyCounts.get(id) || 0) + 1;
+  propertyCounts.set(id, n);
+  if (n <= 3 || n === 10 || n === 50 || n === 100) {
+    log('PROPERTY ' + channel + ' key=' + key + ' count=' + n +
+        ' value=' + value + ' spoofed=' + (spoofed ? '1' : '0'));
+  }
+}
+
+function hookPropertyApi(name) {
+  const p = globalExport(name);
   if (p === null) {
-    log('__system_property_get export not found');
+    log(name + ' export not found');
     return;
   }
 
@@ -147,116 +145,121 @@ function hookSystemPropertyGet() {
         try {
           this.out.writeUtf8String(replacement);
           retval.replace(replacement.length);
-          logKey('__system_property_get', this.key, replacement, true);
+          propertyLog(name, this.key, replacement, true);
         } catch (e) {
-          log('property write failed key=' + this.key + ' error=' + e);
+          log('property write failed ' + name + ' key=' + this.key + ' error=' + e);
         }
         return;
       }
 
-      if (interestingKey(this.key)) {
+      if (interestingProperty(this.key)) {
         let value = '';
         try { value = this.out.readUtf8String(); } catch (_) {}
-        logKey('__system_property_get', this.key, value, false);
+        propertyLog(name, this.key, value, false);
       }
     }
   });
 
-  log('hooked __system_property_get @ ' + p);
+  log('hooked ' + name + ' @ ' + p);
 }
 
-function hookPropertyGet() {
-  const p = globalExport('property_get');
+function safeReadUtf8(p) {
+  try {
+    if (p === null || p.isNull()) return '<null>';
+    return p.readUtf8String();
+  } catch (_) {
+    return '<unreadable>';
+  }
+}
+
+function traceFunction(name, formatter) {
+  const p = globalExport(name);
   if (p === null) {
-    log('property_get export not found');
+    runtimeLog('MISSING ' + name);
     return;
   }
 
-  Interceptor.attach(p, {
-    onEnter(args) {
-      this.key = null;
-      this.out = args[1];
-      try { this.key = args[0].readUtf8String(); } catch (_) {}
-    },
-    onLeave(retval) {
-      if (!this.key) return;
-
-      const replacement = SPOOF_PROPERTIES[this.key];
-      if (replacement !== undefined) {
+  try {
+    Interceptor.attach(p, {
+      onEnter(args) {
+        this.emit = shouldEmitRuntime(name);
+        if (!this.emit) return;
+        this.caller = callerInfo(this.returnAddress);
+        this.detail = '';
         try {
-          this.out.writeUtf8String(replacement);
-          retval.replace(replacement.length);
-          logKey('property_get', this.key, replacement, true);
-        } catch (e) {
-          log('property_get write failed key=' + this.key + ' error=' + e);
-        }
-        return;
-      }
-
-      if (interestingKey(this.key)) {
-        let value = '';
-        try { value = this.out.readUtf8String(); } catch (_) {}
-        logKey('property_get', this.key, value, false);
-      }
-    }
-  });
-
-  log('hooked property_get @ ' + p);
-}
-
-function hookGetenv() {
-  const p = globalExport('getenv');
-  if (p === null) {
-    log('getenv export not found');
-    return;
-  }
-
-  Interceptor.attach(p, {
-    onEnter(args) {
-      this.key = null;
-      try { this.key = args[0].readUtf8String(); } catch (_) {}
-    },
-    onLeave(retval) {
-      if (!this.key) return;
-
-      const replacement = SPOOF_ENV[this.key];
-      if (replacement !== undefined) {
-        retval.replace(pinnedStrings[this.key]);
-        logKey('getenv', this.key, replacement, true);
-        return;
-      }
-
-      if (interestingKey(this.key)) {
-        let value = '<null>';
-        try {
-          if (!retval.isNull()) value = retval.readUtf8String();
+          if (formatter) this.detail = formatter(args) || '';
         } catch (_) {}
-        logKey('getenv', this.key, value, false);
+      },
+      onLeave(retval) {
+        if (!this.emit) return;
+        runtimeLog('CALL ' + name + ' caller=' + this.caller +
+                   (this.detail ? ' ' + this.detail : '') +
+                   ' ret=' + retval);
       }
-    }
-  });
+    });
+    runtimeLog('HOOKED ' + name + ' @ ' + p);
+  } catch (e) {
+    runtimeLog('HOOK-ERROR ' + name + ' ' + e);
+  }
+}
 
-  log('hooked getenv @ ' + p);
+function installRuntimeTracing() {
+  runtimeLog('START pid=' + Process.id + ' arch=' + Process.arch);
+
+  // Time / clock reads.
+  traceFunction('time');
+  traceFunction('gettimeofday');
+  traceFunction('clock_gettime', args => 'clockId=' + args[0].toInt32());
+  traceFunction('clock_getres', args => 'clockId=' + args[0].toInt32());
+
+  // DNS / network lifecycle.
+  traceFunction('getaddrinfo', args => 'host=' + safeReadUtf8(args[0]));
+  traceFunction('connect', args => 'fd=' + args[0].toInt32());
+  traceFunction('send', args => 'fd=' + args[0].toInt32() + ' len=' + args[2].toInt32());
+  traceFunction('recv', args => 'fd=' + args[0].toInt32() + ' len=' + args[2].toInt32());
+
+  // File/runtime loading paths often used for integrity/config checks.
+  traceFunction('open', args => 'path=' + safeReadUtf8(args[0]));
+  traceFunction('openat', args => 'path=' + safeReadUtf8(args[1]));
+  traceFunction('fopen', args => 'path=' + safeReadUtf8(args[0]));
+  traceFunction('access', args => 'path=' + safeReadUtf8(args[0]));
+  traceFunction('stat', args => 'path=' + safeReadUtf8(args[0]));
+  traceFunction('dlopen', args => 'path=' + safeReadUtf8(args[0]));
+  traceFunction('android_dlopen_ext', args => 'path=' + safeReadUtf8(args[0]));
+
+  runtimeLog('READY');
 }
 
 function summary() {
-  const entries = [];
-  for (const [id, count] of hitCounts.entries()) {
-    entries.push(id + '=' + count);
-  }
-  entries.sort();
-  log('SUMMARY ' + entries.join(', '));
+  const runtime = [];
+  for (const [name, count] of runtimeCounts.entries()) runtime.push(name + '=' + count);
+  runtime.sort();
+  log('RUNTIME-SUMMARY ' + runtime.join(', '));
+
+  const props = [];
+  for (const [name, count] of propertyCounts.entries()) props.push(name + '=' + count);
+  props.sort();
+  log('PROPERTY-SUMMARY ' + props.join(', '));
 }
 
 log('START pid=' + Process.id + ' arch=' + Process.arch);
-log('mode=native-only targeted-probe; Java bridge not required');
+log('mode=native-only region+runtime-trace; Java bridge not required');
 
 try {
   applyEnvironment();
-  hookSystemPropertyGet();
-  hookPropertyGet();
-  hookGetenv();
+  hookPropertyApi('__system_property_get');
+  hookPropertyApi('property_get');
   log('READY timezone=America/New_York locale=en-US country=US');
+
+  // Delay runtime tracing so early Gadget/Unity startup remains light.
+  setTimeout(function () {
+    try {
+      installRuntimeTracing();
+    } catch (e) {
+      runtimeLog('FATAL ' + (e && e.stack ? e.stack : e));
+    }
+  }, 2500);
+
   setTimeout(summary, 15000);
   setTimeout(summary, 30000);
 } catch (e) {

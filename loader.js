@@ -1,102 +1,97 @@
 'use strict';
 
-/*
- * loader.js
- * Permanent Frida Gadget entry script for the Android-only MKT project.
- *
- * Put THIS loader where Gadget's fixed APK config points.
- * Mutable workloads live outside the APK at:
- *
- *   /storage/emulated/0/Frida/Scripts/
- *
- * Current load order:
- *   1. Logger.js
- *   2. account_loader.js
- */
+const VERSION = "loader-debug-v1";
+const ROOT = "/storage/emulated/0/Android/data/com.nintendo.zaka/files/Frida";
+const SCRIPT_DIR = ROOT + "/Scripts";
+const LOG_DIR = ROOT + "/Logs";
+const BOOT_LOG = LOG_DIR + "/loader_boot.log";
 
-const LOADER_VERSION = "loader-v1";
-const SCRIPT_DIR = "/storage/emulated/0/Frida/Scripts";
-
-const WORKLOADS = [
-  "Logger.js",
-  "account_loader.js"
-];
-
-function report(message) {
-  const text = "[LOADER] " + message;
-  console.log(text);
-
-  try {
-    if (globalThis.MKTLogger) {
-      globalThis.MKTLogger.log("LOADER", "STATUS", {
-        version: LOADER_VERSION,
-        message
-      });
-    }
-  } catch (_) {}
+function cstr(s) {
+  return Memory.allocUtf8String(s);
 }
 
-function readScript(path) {
-  const file = new File(path, "r");
-  try {
-    return file.readText();
-  } finally {
-    file.close();
-  }
+function getExport(name) {
+  const p = Module.findGlobalExportByName(name);
+  if (p === null) throw new Error("missing libc export: " + name);
+  return p;
 }
 
-function loadScript(filename) {
-  const path = SCRIPT_DIR + "/" + filename;
-
-  report("loading " + path);
-
+function mkdirp(path) {
   try {
-    const source = readScript(path);
-
-    if (!source || source.length === 0) {
-      throw new Error("script is empty");
-    }
-
-    // Evaluate in this Gadget script's global context so workloads can share
-    // globals such as MKTLogger and Il2Cpp.
-    (0, eval)(
-      source +
-      "\n//# sourceURL=" +
-      path.replace(/\s/g, "%20")
-    );
-
-    report("loaded " + filename + " (" + source.length + " chars)");
-    return true;
-  } catch (error) {
-    const detail =
-      error && error.stack
-        ? String(error.stack)
-        : String(error);
-
-    console.error("[LOADER] failed " + filename + ": " + detail);
-
-    try {
-      if (globalThis.MKTLogger) {
-        globalThis.MKTLogger.error("SCRIPT-LOAD-FAILED", {
-          filename,
-          path,
-          error: detail
-        });
-      }
-    } catch (_) {}
-
+    const system = new NativeFunction(getExport("system"), "int", ["pointer"]);
+    const cmd = 'mkdir -p "' + path + '"';
+    return system(cstr(cmd)) === 0;
+  } catch (e) {
+    console.error("[LOADER-DEBUG] mkdir failed: " + e);
     return false;
   }
 }
 
-report(
-  LOADER_VERSION +
-  " starting; external script directory=" +
-  SCRIPT_DIR
-);
-
-for (const workload of WORKLOADS) {
-  loadScript(workload);
+function append(path, line) {
+  try {
+    const f = new File(path, "a");
+    f.write(line + "\n");
+    f.flush();
+    f.close();
+    return true;
+  } catch (e) {
+    console.error("[LOADER-DEBUG] write failed: " + e);
+    return false;
+  }
 }
 
-report("startup complete");
+function stamp() {
+  return new Date().toISOString();
+}
+
+mkdirp(LOG_DIR);
+
+append(
+  BOOT_LOG,
+  stamp() + " [" + VERSION + "] START pid=" + Process.id +
+  " arch=" + Process.arch
+);
+
+append(
+  BOOT_LOG,
+  stamp() + " scriptDir=" + SCRIPT_DIR
+);
+
+function loadOne(name) {
+  const path = SCRIPT_DIR + "/" + name;
+
+  append(BOOT_LOG, stamp() + " LOAD-BEGIN " + path);
+
+  try {
+    const f = new File(path, "r");
+    let src = "";
+    try {
+      src = f.readText();
+    } finally {
+      f.close();
+    }
+
+    append(
+      BOOT_LOG,
+      stamp() + " READ-OK " + name + " bytes=" + src.length
+    );
+
+    (0, eval)(src + "\n//# sourceURL=" + path.replace(/\s/g, "%20"));
+
+    append(BOOT_LOG, stamp() + " EVAL-OK " + name);
+    return true;
+  } catch (e) {
+    const detail = e && e.stack ? String(e.stack) : String(e);
+    append(
+      BOOT_LOG,
+      stamp() + " LOAD-ERROR " + name + " :: " +
+      detail.replace(/\r?\n/g, " | ")
+    );
+    return false;
+  }
+}
+
+loadOne("Logger.js");
+loadOne("account_loader.js");
+
+append(BOOT_LOG, stamp() + " STARTUP-COMPLETE");

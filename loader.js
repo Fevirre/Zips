@@ -24,11 +24,11 @@ function run(name) {
     (0, eval)(src + "\n//# sourceURL=" + path);
     log("EVAL-OK " + name);
   } catch (e) {
-    log("LOAD-ERROR " + name + " " + String(e));
+    const detail = e && e.stack ? String(e.stack) : String(e);
+    log("LOAD-ERROR " + name + " " + detail.replace(/\r?\n/g, " | "));
   }
 }
 
-log("START pid=" + Process.id + " arch=" + Process.arch);
+log("START-SPOOFER-ONLY pid=" + Process.id + " arch=" + Process.arch);
 run("spoofer.js");
-run("time_probe.js");
-log("DONE");
+log("DONE-SPOOFER-ONLY");

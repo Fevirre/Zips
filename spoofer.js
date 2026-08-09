@@ -1,21 +1,15 @@
 'use strict';
 
 /*
- * spoofer.js - native-only Android/QJS regional spoofer
- * No Java bridge is required.
+ * spoofer.js - native-only Android/QJS regional probe v3
+ * No Java bridge required.
  *
- * Scope for this revision:
- *   - America/New_York timezone identity
- *   - en-US / US locale identity
- *   - Android system-property reads
- *   - libc environment reads
- *   - passive logging of the exact keys MKT requests
- *
- * Deliberately NOT hooking clock_gettime/gettimeofday yet, because the
- * earlier time probe showed that aggressive startup interception can stall MKT.
+ * Keeps the working America/New_York / en-US environment spoof while
+ * rate-limiting duplicate reads and logging the time/locale-related
+ * system-property keys MKT actually requests.
  */
 
-const VERSION = 'spoofer-native-v2';
+const VERSION = 'spoofer-native-v3';
 const LOG_PATH = '/storage/emulated/0/Android/data/com.nintendo.zaka/files/Frida/Logs/spoofer.log';
 
 const SPOOF_PROPERTIES = {
@@ -40,8 +34,11 @@ for (const key of Object.keys(SPOOF_ENV)) {
   pinnedStrings[key] = Memory.allocUtf8String(SPOOF_ENV[key]);
 }
 
-let eventCount = 0;
-const MAX_LOG_EVENTS = 300;
+const hitCounts = new Map();
+const firstSeen = new Set();
+const MAX_UNIQUE_LOGS = 160;
+const MAX_PER_KEY_VERBOSE = 3;
+let uniqueLogs = 0;
 
 function log(message) {
   try {
@@ -50,14 +47,49 @@ function log(message) {
     f.flush();
     f.close();
   } catch (_) {}
-
   try { console.log('[mkt-spoofer] ' + message); } catch (_) {}
 }
 
-function logEvent(message) {
-  if (eventCount >= MAX_LOG_EVENTS) return;
-  eventCount++;
-  log(message);
+function shouldLogKey(channel, key) {
+  const id = channel + ':' + key;
+  const count = (hitCounts.get(id) || 0) + 1;
+  hitCounts.set(id, count);
+
+  if (count <= MAX_PER_KEY_VERBOSE) return true;
+  if (count === 10 || count === 50 || count === 100 || count === 500 || count === 1000) return true;
+  return false;
+}
+
+function logKey(channel, key, value, spoofed) {
+  const id = channel + ':' + key;
+  if (!firstSeen.has(id)) {
+    firstSeen.add(id);
+    if (uniqueLogs < MAX_UNIQUE_LOGS) {
+      uniqueLogs++;
+      log('FIRST ' + channel + ' key=' + key + ' value=' + value + (spoofed ? ' spoofed=1' : ' spoofed=0'));
+    }
+    return;
+  }
+
+  if (shouldLogKey(channel, key)) {
+    const count = hitCounts.get(id) || 0;
+    log('HIT ' + channel + ' key=' + key + ' count=' + count + ' value=' + value + (spoofed ? ' spoofed=1' : ' spoofed=0'));
+  }
+}
+
+function interestingKey(key) {
+  if (!key) return false;
+  const k = key.toLowerCase();
+  return k.includes('time') ||
+         k.includes('clock') ||
+         k.includes('date') ||
+         k.includes('zone') ||
+         k.includes('locale') ||
+         k.includes('region') ||
+         k.includes('country') ||
+         k.includes('language') ||
+         k.includes('network') ||
+         k.includes('ntp');
 }
 
 function globalExport(name) {
@@ -115,20 +147,17 @@ function hookSystemPropertyGet() {
         try {
           this.out.writeUtf8String(replacement);
           retval.replace(replacement.length);
-          logEvent('__system_property_get ' + this.key + ' => ' + replacement);
+          logKey('__system_property_get', this.key, replacement, true);
         } catch (e) {
-          logEvent('__system_property_get write failed ' + this.key + ': ' + e);
+          log('property write failed key=' + this.key + ' error=' + e);
         }
         return;
       }
 
-      if (this.key.indexOf('time') !== -1 ||
-          this.key.indexOf('locale') !== -1 ||
-          this.key.indexOf('region') !== -1 ||
-          this.key.indexOf('country') !== -1) {
+      if (interestingKey(this.key)) {
         let value = '';
         try { value = this.out.readUtf8String(); } catch (_) {}
-        logEvent('__system_property_get observed ' + this.key + ' => ' + value);
+        logKey('__system_property_get', this.key, value, false);
       }
     }
   });
@@ -151,14 +180,23 @@ function hookPropertyGet() {
     },
     onLeave(retval) {
       if (!this.key) return;
+
       const replacement = SPOOF_PROPERTIES[this.key];
-      if (replacement === undefined) return;
-      try {
-        this.out.writeUtf8String(replacement);
-        retval.replace(replacement.length);
-        logEvent('property_get ' + this.key + ' => ' + replacement);
-      } catch (e) {
-        logEvent('property_get write failed ' + this.key + ': ' + e);
+      if (replacement !== undefined) {
+        try {
+          this.out.writeUtf8String(replacement);
+          retval.replace(replacement.length);
+          logKey('property_get', this.key, replacement, true);
+        } catch (e) {
+          log('property_get write failed key=' + this.key + ' error=' + e);
+        }
+        return;
+      }
+
+      if (interestingKey(this.key)) {
+        let value = '';
+        try { value = this.out.readUtf8String(); } catch (_) {}
+        logKey('property_get', this.key, value, false);
       }
     }
   });
@@ -180,18 +218,38 @@ function hookGetenv() {
     },
     onLeave(retval) {
       if (!this.key) return;
+
       const replacement = SPOOF_ENV[this.key];
-      if (replacement === undefined) return;
-      retval.replace(pinnedStrings[this.key]);
-      logEvent('getenv ' + this.key + ' => ' + replacement);
+      if (replacement !== undefined) {
+        retval.replace(pinnedStrings[this.key]);
+        logKey('getenv', this.key, replacement, true);
+        return;
+      }
+
+      if (interestingKey(this.key)) {
+        let value = '<null>';
+        try {
+          if (!retval.isNull()) value = retval.readUtf8String();
+        } catch (_) {}
+        logKey('getenv', this.key, value, false);
+      }
     }
   });
 
   log('hooked getenv @ ' + p);
 }
 
+function summary() {
+  const entries = [];
+  for (const [id, count] of hitCounts.entries()) {
+    entries.push(id + '=' + count);
+  }
+  entries.sort();
+  log('SUMMARY ' + entries.join(', '));
+}
+
 log('START pid=' + Process.id + ' arch=' + Process.arch);
-log('mode=native-only; Java bridge not required');
+log('mode=native-only targeted-probe; Java bridge not required');
 
 try {
   applyEnvironment();
@@ -199,6 +257,8 @@ try {
   hookPropertyGet();
   hookGetenv();
   log('READY timezone=America/New_York locale=en-US country=US');
+  setTimeout(summary, 15000);
+  setTimeout(summary, 30000);
 } catch (e) {
   log('FATAL ' + (e && e.stack ? e.stack : e));
 }

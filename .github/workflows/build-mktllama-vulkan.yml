@@ -24,6 +24,8 @@ jobs:
       - name: Fetch llama.cpp b10448
         run: |
           git clone --depth 1 --branch b10448 https://github.com/ggml-org/llama.cpp.git llama.cpp
+          mkdir -p host-vulkan-cpp/vulkan
+          cp /usr/include/vulkan/*.hpp host-vulkan-cpp/vulkan/
 
       - name: Build host Vulkan shader generator
         run: |
@@ -209,6 +211,9 @@ jobs:
           set(GGML_VULKAN_VALIDATE OFF CACHE BOOL "" FORCE)
           set(GGML_VULKAN_DEBUG OFF CACHE BOOL "" FORCE)
           add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/../llama.cpp llama-build)
+          if(TARGET ggml-vulkan)
+            target_include_directories(ggml-vulkan PRIVATE ${CMAKE_CURRENT_LIST_DIR}/../host-vulkan-cpp)
+          endif()
           add_library(mktllama SHARED mktllama_jni.cpp)
           target_include_directories(mktllama PRIVATE
               ${CMAKE_CURRENT_LIST_DIR}/../llama.cpp/include

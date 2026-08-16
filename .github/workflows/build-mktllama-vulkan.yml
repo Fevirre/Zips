@@ -222,11 +222,15 @@ jobs:
 
       - name: Cross-compile libmktllama.so for Android arm64-v8a
         run: |
+          SPIRV_HEADERS_DIR="$(dirname "$(dpkg -L spirv-headers | grep 'SPIRV-HeadersConfig.cmake$' | head -n1)")"
+          echo "Using SPIRV-Headers_DIR=$SPIRV_HEADERS_DIR"
           cmake -S mkt-jni -B android-build -G Ninja \
             -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
             -DANDROID_ABI=arm64-v8a \
             -DANDROID_PLATFORM=android-31 \
             -DANDROID_STL=c++_static \
+            -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=BOTH \
+            -DSPIRV-Headers_DIR="$SPIRV_HEADERS_DIR" \
             -DCMAKE_BUILD_TYPE=Release
           cmake --build android-build --target mktllama -j2
 

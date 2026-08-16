@@ -14,7 +14,7 @@ jobs:
       - name: Install host build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ninja-build glslc libvulkan-dev
+          sudo apt-get install -y ninja-build glslc libvulkan-dev spirv-headers spirv-tools
 
       - name: Install Android NDK r29
         run: |

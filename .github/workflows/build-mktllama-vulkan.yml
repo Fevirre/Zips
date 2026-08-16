@@ -1,0 +1,247 @@
+name: Build libmktllama Vulkan
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/build-mktllama-vulkan.yml'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Install host build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build glslc libvulkan-dev
+
+      - name: Install Android NDK r29
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;29.0.14206865"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/29.0.14206865" >> "$GITHUB_ENV"
+
+      - name: Fetch llama.cpp b10448
+        run: |
+          git clone --depth 1 --branch b10448 https://github.com/ggml-org/llama.cpp.git llama.cpp
+
+      - name: Build host Vulkan shader generator
+        run: |
+          cmake -S llama.cpp -B host-build -G Ninja \
+            -DGGML_VULKAN=ON \
+            -DGGML_NATIVE=OFF \
+            -DGGML_OPENMP=OFF \
+            -DLLAMA_BUILD_TESTS=OFF \
+            -DLLAMA_BUILD_EXAMPLES=OFF \
+            -DLLAMA_BUILD_SERVER=OFF
+          cmake --build host-build --target vulkan-shaders-gen -j2
+          mkdir -p "$GITHUB_WORKSPACE/host-tools"
+          cp host-build/bin/vulkan-shaders-gen "$GITHUB_WORKSPACE/host-tools/"
+          echo "$GITHUB_WORKSPACE/host-tools" >> "$GITHUB_PATH"
+
+      - name: Write JNI bridge
+        run: |
+          mkdir -p mkt-jni
+          cat > mkt-jni/mktllama_jni.cpp <<'CPP'
+          #include <jni.h>
+          #include <string>
+          #include <vector>
+          #include <algorithm>
+          #include "llama.h"
+          #include "ggml-backend.h"
+
+          static llama_model * g_model = nullptr;
+          static llama_context * g_ctx = nullptr;
+          static int g_ctx_size = 4096;
+          static int g_threads = 6;
+          static int g_gpu_layers = 99;
+
+          static void free_context() {
+              if (g_ctx) { llama_free(g_ctx); g_ctx = nullptr; }
+          }
+
+          static void free_model() {
+              free_context();
+              if (g_model) { llama_model_free(g_model); g_model = nullptr; }
+          }
+
+          static bool new_context() {
+              free_context();
+              if (!g_model) return false;
+              llama_context_params cp = llama_context_default_params();
+              cp.n_ctx = (uint32_t) g_ctx_size;
+              cp.n_batch = (uint32_t) std::min(g_ctx_size, 1024);
+              cp.n_threads = g_threads;
+              cp.n_threads_batch = g_threads;
+              g_ctx = llama_init_from_model(g_model, cp);
+              return g_ctx != nullptr;
+          }
+
+          static jstring jstr(JNIEnv * env, const std::string & s) {
+              return env->NewStringUTF(s.c_str());
+          }
+
+          extern "C" JNIEXPORT jstring JNICALL
+          Java_com_mkt_toolbox_NativeAiBridge_nativeBackendInfo(JNIEnv * env, jclass) {
+              std::string s = "llama.cpp b10448 • Vulkan enabled • arm64-v8a";
+              s += g_model ? " • model loaded" : " • model not loaded";
+              s += " • GPU layers=" + std::to_string(g_gpu_layers);
+              return jstr(env, s);
+          }
+
+          extern "C" JNIEXPORT jboolean JNICALL
+          Java_com_mkt_toolbox_NativeAiBridge_nativeHasVulkan(JNIEnv *, jclass) {
+              return JNI_TRUE;
+          }
+
+          extern "C" JNIEXPORT jstring JNICALL
+          Java_com_mkt_toolbox_NativeAiBridge_nativeVulkanInfo(JNIEnv * env, jclass) {
+              return jstr(env, "Vulkan backend compiled into libmktllama.so • GPU offload requested automatically");
+          }
+
+          extern "C" JNIEXPORT jstring JNICALL
+          Java_com_mkt_toolbox_NativeAiBridge_nativeLoadModel(JNIEnv * env, jclass, jstring jpath,
+                                                               jint context_size, jint threads, jint gpu_layers) {
+              free_model();
+              ggml_backend_load_all();
+              llama_backend_init();
+
+              const char * path = env->GetStringUTFChars(jpath, nullptr);
+              if (!path) return jstr(env, "ERROR: invalid model path");
+
+              g_ctx_size = context_size > 0 ? context_size : 4096;
+              g_threads = threads > 0 ? threads : 6;
+              g_gpu_layers = gpu_layers >= 0 ? gpu_layers : 99;
+
+              llama_model_params mp = llama_model_default_params();
+              mp.n_gpu_layers = g_gpu_layers;
+              g_model = llama_model_load_from_file(path, mp);
+              env->ReleaseStringUTFChars(jpath, path);
+
+              if (!g_model) return jstr(env, "ERROR: llama_model_load_from_file failed");
+              if (!new_context()) {
+                  free_model();
+                  return jstr(env, "ERROR: llama_init_from_model failed");
+              }
+              return jstr(env, "OK • model loaded • Vulkan GPU offload requested • GPU layers=" + std::to_string(g_gpu_layers));
+          }
+
+          extern "C" JNIEXPORT jstring JNICALL
+          Java_com_mkt_toolbox_NativeAiBridge_nativeGenerate(JNIEnv * env, jclass, jstring jprompt,
+                                                              jint max_tokens, jfloat temperature) {
+              if (!g_model) return jstr(env, "ERROR: model is not loaded");
+              if (!new_context()) return jstr(env, "ERROR: failed to reset inference context");
+
+              const char * p = env->GetStringUTFChars(jprompt, nullptr);
+              if (!p) return jstr(env, "ERROR: invalid prompt");
+              std::string prompt(p);
+              env->ReleaseStringUTFChars(jprompt, p);
+
+              const llama_vocab * vocab = llama_model_get_vocab(g_model);
+              int n_prompt = -llama_tokenize(vocab, prompt.c_str(), (int32_t) prompt.size(), nullptr, 0, true, true);
+              if (n_prompt <= 0) return jstr(env, "ERROR: tokenizer returned no tokens");
+              if (n_prompt + max_tokens + 8 > g_ctx_size) {
+                  max_tokens = std::max(1, g_ctx_size - n_prompt - 8);
+              }
+
+              std::vector<llama_token> tokens((size_t) n_prompt);
+              if (llama_tokenize(vocab, prompt.c_str(), (int32_t) prompt.size(), tokens.data(), (int32_t) tokens.size(), true, true) < 0) {
+                  return jstr(env, "ERROR: tokenization failed");
+              }
+
+              llama_sampler * smpl = llama_sampler_chain_init(llama_sampler_chain_default_params());
+              if (temperature <= 0.001f) {
+                  llama_sampler_chain_add(smpl, llama_sampler_init_greedy());
+              } else {
+                  llama_sampler_chain_add(smpl, llama_sampler_init_temp(temperature));
+                  llama_sampler_chain_add(smpl, llama_sampler_init_dist(LLAMA_DEFAULT_SEED));
+              }
+
+              llama_batch batch = llama_batch_get_one(tokens.data(), (int32_t) tokens.size());
+              if (llama_decode(g_ctx, batch) != 0) {
+                  llama_sampler_free(smpl);
+                  return jstr(env, "ERROR: prompt decode failed");
+              }
+
+              std::string out;
+              for (int i = 0; i < max_tokens; ++i) {
+                  llama_token tok = llama_sampler_sample(smpl, g_ctx, -1);
+                  if (llama_vocab_is_eog(vocab, tok)) break;
+
+                  char small[256];
+                  int n = llama_token_to_piece(vocab, tok, small, sizeof(small), 0, true);
+                  if (n < 0) {
+                      std::vector<char> big((size_t) -n);
+                      n = llama_token_to_piece(vocab, tok, big.data(), (int32_t) big.size(), 0, true);
+                      if (n > 0) out.append(big.data(), (size_t) n);
+                  } else if (n > 0) {
+                      out.append(small, (size_t) n);
+                  }
+
+                  batch = llama_batch_get_one(&tok, 1);
+                  if (llama_decode(g_ctx, batch) != 0) break;
+              }
+
+              llama_sampler_free(smpl);
+              return jstr(env, out.empty() ? std::string("[empty model response]") : out);
+          }
+
+          extern "C" JNIEXPORT void JNICALL
+          Java_com_mkt_toolbox_NativeAiBridge_nativeUnloadModel(JNIEnv *, jclass) {
+              free_model();
+          }
+          CPP
+
+          cat > mkt-jni/CMakeLists.txt <<'CMAKE'
+          cmake_minimum_required(VERSION 3.22)
+          project(mktllama LANGUAGES C CXX)
+          set(CMAKE_C_STANDARD 11)
+          set(CMAKE_CXX_STANDARD 17)
+          set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+          set(LLAMA_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+          set(LLAMA_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+          set(LLAMA_BUILD_SERVER OFF CACHE BOOL "" FORCE)
+          set(GGML_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+          set(GGML_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+          set(GGML_NATIVE OFF CACHE BOOL "" FORCE)
+          set(GGML_OPENMP OFF CACHE BOOL "" FORCE)
+          set(GGML_VULKAN ON CACHE BOOL "" FORCE)
+          set(GGML_VULKAN_VALIDATE OFF CACHE BOOL "" FORCE)
+          set(GGML_VULKAN_DEBUG OFF CACHE BOOL "" FORCE)
+          add_subdirectory(${CMAKE_CURRENT_LIST_DIR}/../llama.cpp llama-build)
+          add_library(mktllama SHARED mktllama_jni.cpp)
+          target_include_directories(mktllama PRIVATE
+              ${CMAKE_CURRENT_LIST_DIR}/../llama.cpp/include
+              ${CMAKE_CURRENT_LIST_DIR}/../llama.cpp/ggml/include)
+          find_library(log-lib log)
+          find_library(android-lib android)
+          find_library(vulkan-lib vulkan)
+          target_link_libraries(mktllama PRIVATE llama ggml ${log-lib} ${android-lib} ${vulkan-lib})
+          target_compile_options(mktllama PRIVATE -O3)
+          CMAKE
+
+      - name: Cross-compile libmktllama.so for Android arm64-v8a
+        run: |
+          cmake -S mkt-jni -B android-build -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-31 \
+            -DCMAKE_BUILD_TYPE=Release
+          cmake --build android-build --target mktllama -j2
+
+      - name: Verify library
+        run: |
+          file android-build/libmktllama.so
+          "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf" -h android-build/libmktllama.so
+          "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf" -d android-build/libmktllama.so | tee dynamic.txt
+          mkdir -p out
+          cp android-build/libmktllama.so out/
+          cp dynamic.txt out/
+          sha256sum out/libmktllama.so | tee out/SHA256.txt
+
+      - name: Upload libmktllama artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: libmktllama-android-arm64-vulkan
+          path: out/
+          if-no-files-found: error

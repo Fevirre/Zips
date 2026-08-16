@@ -26,6 +26,7 @@ jobs:
           git clone --depth 1 --branch b10448 https://github.com/ggml-org/llama.cpp.git llama.cpp
           mkdir -p host-vulkan-cpp/vulkan
           cp /usr/include/vulkan/*.hpp host-vulkan-cpp/vulkan/
+          cp -r /usr/include/spirv host-vulkan-cpp/
 
       - name: Build host Vulkan shader generator
         run: |
